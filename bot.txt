@@ -1,0 +1,275 @@
+import telebot
+import json
+import random
+import string
+import datetime
+import os
+from flask import Flask, request, jsonify
+import threading
+
+# ========== НАСТРОЙКИ (БЕРУТСЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ) ==========
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН_ДЛЯ_ТЕСТОВ")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 123456789))
+
+bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
+
+# Файлы для хранения ключей (на Render они сохраняются временно)
+KEYS_FILE = "keys.json"
+USED_KEYS_FILE = "used_keys.json"
+
+# ========== РАБОТА С ФАЙЛАМИ ==========
+def load_keys():
+    if os.path.exists(KEYS_FILE):
+        with open(KEYS_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_keys(keys):
+    with open(KEYS_FILE, 'w') as f:
+        json.dump(keys, f, indent=2)
+
+def load_used_keys():
+    if os.path.exists(USED_KEYS_FILE):
+        with open(USED_KEYS_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_used_keys(keys):
+    with open(USED_KEYS_FILE, 'w') as f:
+        json.dump(keys, f, indent=2)
+
+# ========== ГЕНЕРАЦИЯ КЛЮЧЕЙ ==========
+def generate_key():
+    """Генерирует ключ формата OAK-XXXX-XXXX-XXXX"""
+    parts = []
+    for _ in range(3):
+        part = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        parts.append(part)
+    return f"OAK-{'-'.join(parts)}"
+
+def create_key(days_valid=30):
+    """Создаёт новый ключ с указанным сроком действия (дней)"""
+    key = generate_key()
+    keys = load_keys()
+    keys[key] = {
+        "created_at": datetime.datetime.now().isoformat(),
+        "expires_at": (datetime.datetime.now() + datetime.timedelta(days=days_valid)).isoformat(),
+        "days_valid": days_valid
+    }
+    save_keys(keys)
+    return key
+
+def is_key_valid(key):
+    """Проверяет, действителен ли ключ"""
+    keys = load_keys()
+    used_keys = load_used_keys()
+    
+    if key not in keys:
+        return False, "Ключ не найден"
+    
+    if key in used_keys:
+        return False, "Ключ уже использован"
+    
+    expires_at = datetime.datetime.fromisoformat(keys[key]["expires_at"])
+    if datetime.datetime.now() > expires_at:
+        return False, "Срок действия истёк"
+    
+    return True, "OK"
+
+def mark_key_as_used(key, username):
+    """Отмечает ключ как использованный"""
+    used_keys = load_used_keys()
+    used_keys[key] = {
+        "used_by": username,
+        "used_at": datetime.datetime.now().isoformat()
+    }
+    save_used_keys(used_keys)
+    
+    # Отправляем уведомление админу в Telegram
+    bot.send_message(
+        ADMIN_ID, 
+        f"✅ КЛЮЧ ИСПОЛЬЗОВАН!\n\n"
+        f"🔑 Ключ: `{key}`\n"
+        f"👤 Игрок: {username}\n"
+        f"📅 Время: {datetime.datetime.now().strftime('%H:%M:%S')}",
+        parse_mode='Markdown'
+    )
+
+# ========== КОМАНДЫ ТЕЛЕГРАМ БОТА ==========
+@bot.message_handler(commands=['start'])
+def start(message):
+    if message.chat.id != ADMIN_ID:
+        bot.reply_to(message, "❌ У вас нет доступа к этому боту")
+        return
+    
+    bot.reply_to(
+        message, 
+        "🔑 *Бот для генерации ключей Oaklands*\n\n"
+        "📋 *Команды:*\n"
+        "▪️ /gen - создать ключ на 7 дней\n"
+        "▪️ /gen30 - создать ключ на 30 дней\n"
+        "▪️ /gen60 - создать ключ на 60 дней\n"
+        "▪️ /list - список активных ключей\n"
+        "▪️ /used - список использованных ключей\n"
+        "▪️ /stats - статистика\n"
+        "▪️ /del OAK-XXXX-XXXX - удалить ключ",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['gen'])
+def gen_key_7(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    key = create_key(7)
+    bot.reply_to(
+        message, 
+        f"✅ *Новый ключ создан!*\n\n"
+        f"`{key}`\n\n"
+        f"📅 Действителен: 7 дней",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['gen30'])
+def gen_key_30(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    key = create_key(30)
+    bot.reply_to(
+        message, 
+        f"✅ *Новый ключ создан!*\n\n"
+        f"`{key}`\n\n"
+        f"📅 Действителен: 30 дней",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['gen60'])
+def gen_key_60(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    key = create_key(60)
+    bot.reply_to(
+        message, 
+        f"✅ *Новый ключ создан!*\n\n"
+        f"`{key}`\n\n"
+        f"📅 Действителен: 60 дней",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['list'])
+def list_keys(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    
+    keys = load_keys()
+    used = load_used_keys()
+    active = {k: v for k, v in keys.items() if k not in used}
+    
+    if not active:
+        bot.reply_to(message, "📭 Нет активных ключей")
+        return
+    
+    response = f"🔑 *Активные ключи ({len(active)}):*\n\n"
+    for key, data in list(active.items())[:20]:
+        expires = datetime.datetime.fromisoformat(data["expires_at"]).strftime("%d.%m.%Y")
+        response += f"`{key}`\n📅 до {expires}\n\n"
+    
+    bot.reply_to(message, response, parse_mode='Markdown')
+
+@bot.message_handler(commands=['used'])
+def used_keys(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    
+    used = load_used_keys()
+    
+    if not used:
+        bot.reply_to(message, "📭 Нет использованных ключей")
+        return
+    
+    response = f"❌ *Использованные ключи ({len(used)}):*\n\n"
+    for key, data in list(used.items())[:15]:
+        response += f"`{key}`\n👤 {data['used_by']}\n📅 {data['used_at'][:10]}\n\n"
+    
+    bot.reply_to(message, response, parse_mode='Markdown')
+
+@bot.message_handler(commands=['stats'])
+def stats(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    
+    keys = load_keys()
+    used = load_used_keys()
+    active = {k: v for k, v in keys.items() if k not in used}
+    
+    bot.reply_to(
+        message,
+        f"📊 *Статистика*\n\n"
+        f"✅ Активных ключей: {len(active)}\n"
+        f"❌ Использованных: {len(used)}\n"
+        f"📦 Всего сгенерировано: {len(keys)}",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['del'])
+def delete_key(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    
+    parts = message.text.split()
+    if len(parts) != 2:
+        bot.reply_to(message, "❌ Использование: /del OAK-XXXX-XXXX-XXXX")
+        return
+    
+    key = parts[1]
+    keys = load_keys()
+    
+    if key in keys:
+        del keys[key]
+        save_keys(keys)
+        bot.reply_to(message, f"✅ Ключ `{key}` удалён", parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "❌ Ключ не найден")
+
+# ========== API ДЛЯ ROBLOX ==========
+@app.route('/check_key', methods=['GET'])
+def check_key():
+    """Эндпоинт для проверки ключа из Roblox"""
+    key = request.args.get('key')
+    username = request.args.get('user', 'unknown')
+    
+    if not key:
+        return jsonify({"valid": False, "reason": "No key provided"})
+    
+    valid, reason = is_key_valid(key)
+    
+    if valid:
+        mark_key_as_used(key, username)
+        return jsonify({"valid": True})
+    else:
+        return jsonify({"valid": False, "reason": reason})
+
+@app.route('/')
+def home():
+    """Проверка что бот работает"""
+    return "Oaklands Key Bot is running! 🚀"
+
+@app.route('/health')
+def health():
+    """Для проверки здоровья сервера"""
+    return "OK"
+
+# ========== ЗАПУСК ==========
+if __name__ == '__main__':
+    # Запускаем бота в отдельном потоке
+    def run_bot():
+        print("🤖 Бот запущен!")
+        bot.infinity_polling()
+    
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Запускаем Flask сервер
+    port = int(os.environ.get("PORT", 8080))
+    print(f"🌐 API сервер запущен на порту {port}")
+    app.run(host='0.0.0.0', port=port)
